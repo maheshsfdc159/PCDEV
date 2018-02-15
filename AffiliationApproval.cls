@@ -2,6 +2,7 @@ global class AffiliationApproval{
     
     public static void createApproval(List<Account_Affiliation__c> aff){
         System.debug('List of affiliation:'+aff);
+		System.debug('List of affiliation:'+aff);
         Set<ID> ConID = new Set<ID>();
         Set<ID> AccID = new Set<ID>();
         map<string,boolean>delowner=new map<string,boolean>();
