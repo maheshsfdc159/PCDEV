@@ -1,0 +1,517 @@
+@RestResource(URLMapping='/apex/myaccount/v1/MyAccountPracticeService/*')
+global without sharing class MyAccountPharmacyService {
+  
+  @HttpGet
+  global static BaseRestResponse doGet() {
+      BaseRestResponse result = null;
+      RestRequest req=RestContext.request;
+      String url=req.requestURI;
+      List<String> ls =url.split('/');
+      
+      System.debug('URL String>>>>>>'+ls.size()+ ':::'+ ls);
+      
+      String action = ls[5];
+      System.debug('action>>>>>>'+action);
+      
+      ResultsPracticeDetails red = new ResultsPracticeDetails();
+      
+      if(action == 'GetPracticesBySalesrep'){
+          String SalesRepId = RestContext.request.params.get('Userid');
+          red.Practices = getPharmacyDetailsofSalesrep(SalesRepId);
+          return red;
+      }
+      if(action == 'GetPracticeDetailsById'){
+          String PracticeId= RestContext.request.params.get('PracticeId');
+          String FDate = RestContext.request.params.get('FromDate');
+          String TDate = RestContext.request.params.get('ToDate');
+
+          Date fd = null; Date td = null;
+          if(FDate != null ) fd = Date.parse(FDate);
+          if(TDate != null) td = Date.parse(TDate).addDays(1);
+          System.debug('####From date>>>>'+fd);
+          System.debug('####From date>>>>'+td);          
+          return getPracticeDetailedResponse(PracticeId, fd, td);
+      }
+      
+     return null;
+  }
+  
+  global static List<PracticeDetails> getPharmacyDetailsofSalesrep(String UserId){
+      List<PracticeDetails> results = new List<PracticeDetails>();
+      list<ID>userids = new list<ID>();
+      JJVC_Contact_Recordtype__mdt rectype = [select MasterLabel from JJVC_Contact_Recordtype__mdt where DeveloperName ='HCP_Contacts_RecordtypeId'];
+      Id HCPRecordTypeId = rectype.MasterLabel;
+      list<UserTerritory2Association> tmorbm =[SELECT ID,RoleInTerritory2 FROM UserTerritory2Association WHERE UserId=:Userid];
+      if(tmorbm.size()>0)
+      {
+          if(tmorbm[0].RoleInTerritory2=='DBM')
+          {
+            list<user>reps = [SELECT ID,managerid FROM User WHERE managerid=:userid];
+            for(User uss:reps)userids.add(uss.id);
+           }
+           else
+           userids.add(userid);
+      }
+      else
+         userids.add(userid); 
+      Map<Id, Account> mpAccounts = new Map<Id,Account>([Select Id
+                                         , Name
+                                         , SAP_Account_Number__c
+                                         , Email__c
+                                         , Opt_Out__c
+                                         , ShippingStreet
+                                         , ShippingCity
+                                         , ShippingPostalCode
+                                         , ShippingState
+                                         , ShippingCountry
+                                         , (Select Id,AccountId
+                                            From Contacts 
+                                            where Id in (Select Contact__c 
+                                                         from AccountContactRole__c 
+                                                         where  Account_Ownership_Flag__c = true and 
+                                                                Approval_Status__c = 'Accepted' and 
+                                                                Contact__R.RecordTypeId =:HCPRecordTypeId) )
+                                   From Account 
+                                   where TBM_Name__c =:userids
+                                   ]);
+                                   
+      System.debug('########mpAccounts>>>>>>>'+mpAccounts.keySet()); 
+      
+      Map<Id,Id> mpContact = new Map<Id,Id>();
+      Set<Id> ConId = new Set<id>();
+      for(Account a : mpAccounts.values()){
+          if(a.Contacts != null && a.Contacts.size()>0){
+              mpContact.put(a.Contacts[0].AccountId, a.Contacts[0].Id);
+              ConId.add(a.Contacts[0].Id);
+          }
+      }  
+                              
+      Map<Id,User> mpUser = new Map<Id,User>([Select Id
+                                                    , Name
+                                                    , Email
+                                                    , AccountId
+                                                    , ContactId
+                                              From User 
+                                              where isActive = true and AccountId In:mpAccounts.keyset() and 
+                                                    ContactId in(
+                                                                  Select Contact__c
+                                                                  From AccountContactRole__c
+                                                                  where Contact__c in: ConId
+                                                                  and Account_Ownership_Flag__c = true
+                                                                  and Approval_Status__c = 'Accepted'
+                                                                  )]);
+      
+      System.debug('########mpUsers>>>>>>>'+mpUser);
+      Map<Id,User> mpContactUser = new Map<Id,User>();
+      for(User a : mpUser.values()){
+          mpContactUser.put(a.ContactId,a);
+      }
+      
+      for(Account a : mpAccounts.values()){
+          System.debug('########Account Loop>>>>>>>'+a);
+          if(mpContact.ContainsKey(a.Id) && mpContactUser.ContainsKey(mpContact.get(a.Id))){
+              System.debug('########ConId Loop>>>>>>>'+mpContact.get(a.Id));
+              Id ConsId = mpContact.get(a.Id);
+              System.debug('########User >>>>>>>'+mpContactUser.get(ConsId));
+              User u = mpContactUser.get(ConsId);
+              PracticeDetails p = new PracticeDetails(a);
+              p.OwnerId = u.Id;
+              p.OwnerName = u.Name;
+              results.add(p);
+          }else{
+              PracticeDetails p = new PracticeDetails(a);
+              results.add(p);
+          }
+      }
+      
+      System.debug('### Final Results>>>>>>>>>'+results);
+      return results;
+      
+  }
+  
+  global static PracticeDetailedResponse getPracticeDetailedResponse(Id PracticeId, Date FDate, Date TDate){
+      Map<Id,User> mpUser = new Map<Id,User>();
+      List<User> practiceUser = new List<User>();
+      List<User> lsUser = new List<User>();
+      
+      Account Acc = [Select Id, Name from Account where Id =:PracticeId];
+      
+      List<AggregateResult> reportCenterCount;
+      List<AggregateResult> Top3Resource;
+      List<AggregateResult> Top3Page;
+      
+      JJVC_Contact_Recordtype__mdt rectype = [select MasterLabel from JJVC_Contact_Recordtype__mdt where DeveloperName ='HCP_Contacts_RecordtypeId'];
+      Id HCPRecordTypeId = rectype.MasterLabel;
+      
+      if(FDate == null || TDate == null){ reportCenterCount = [Select Type__c, Count(Id) from Report_Center_Data__c where Account__c =:PracticeId  Group by type__c];}
+      
+      if(FDate != null && TDate != null){ reportCenterCount = [Select Type__c, Count(Id) from Report_Center_Data__c where Account__c =:PracticeId and CreatedDate>=:FDate and CreatedDate <=:TDate  Group by type__c];}
+      
+      if(FDate == null || TDate == null){ Top3Resource = [Select Resource_Product__c,  Count(Id) from Report_Center_Data__c where Account__c =:PracticeId and Type__c <> 'Product Page Views' Group by Resource_Product__c Order by Count(ID) Desc limit 3];}
+      
+      if(FDate != null && TDate != null){ Top3Resource = [Select Resource_Product__c,  Count(Id) from Report_Center_Data__c where Account__c =:PracticeId and Type__c <> 'Product Page Views' and CreatedDate>=:FDate and CreatedDate <=:TDate Group by Resource_Product__c Order by Count(ID) Desc limit 3];}
+      
+      if(FDate == null || TDate == null){ Top3Page= [Select Resource_Product__c,  Count(Id) from Report_Center_Data__c where Account__c =:PracticeId  and Type__c = 'Product Page Views' Group by Resource_Product__c Order by Count(ID) Desc limit 3];}
+      
+      if(FDate != null && TDate != null){ Top3Page = [Select Resource_Product__c,  Count(Id) from Report_Center_Data__c where Account__c =:PracticeId and Type__c = 'Product Page Views' and CreatedDate>=:FDate and CreatedDate <=:TDate Group by Resource_Product__c Order by Count(ID) Desc limit 3];}
+      
+      Map<Id, AccountContactRole__c> mpACR = new Map<Id,AccountContactRole__c>([Select Id, 
+                                                                                       Account__c, 
+                                                                                       Contact__c 
+                                                                                From AccountContactRole__c 
+                                                                                where Account__c =:PracticeId and 
+                                                                                      Approval_status__c = 'Accepted' and
+                                                                                      Contact__r.RecordTypeId =: HCPRecordTypeId]);
+      lsUser = [Select Id, 
+                       FirstName, 
+                       LastName, 
+                       ContactId, 
+                       Email, 
+                       Occupation__c, 
+                       Account.Name, 
+                       Account.Id 
+                From User 
+                Where isActive = true and 
+                      ContactId in (Select Contact__c 
+                                      from AccountContactRole__c 
+                                      where Id in: mpACR.keyset())];
+                                       
+      if(FDate != null && TDate != null) lsUser = [Select Id, 
+                                                          FirstName, 
+                                                          LastName, 
+                                                          ContactId, 
+                                                          Email, 
+                                                          Occupation__c, 
+                                                          Account.Name, 
+                                                          Account.Id 
+                                                   From User 
+                                                   Where isActive = true and 
+                                                          CreatedDate>=:FDate and CreatedDate <=:TDate and 
+                                                          ContactId in (Select Contact__c from AccountContactRole__c where id in:mpACR.keyset())];
+      
+      for(user u: lsUser)            
+        {
+            mpUser.put(u.Contactid,u);
+            practiceUser.add(u);
+        }
+        
+        System.debug('### Final mpUser>>>>>>>>>'+mpUser);
+        
+        AggregateResult[] arStarted = [Select Count(Course__c) 
+                                       from CourseAssignment__c 
+                                       where Contact__r.AccountId =:PracticeId  and 
+                                             (Status__c = 'In Progress' OR Status__c = 'Completed') and 
+                                             Contact__c in (Select Contact__c From AccountContactRole__c where Approval_Status__c = 'Accepted'and Contact__r.RecordTypeId =:HCPRecordTypeId) 
+                                             Group By Id];
+        
+        if(FDate != null && TDate != null){  
+            arStarted = [Select Count(Course__c) 
+                                           from CourseAssignment__c 
+                                           where Contact__r.AccountId =:PracticeId  and 
+                                                 (Status__c = 'In Progress' or Status__c = 'Completed') and 
+                                                 Contact__c in (Select Contact__c From AccountContactRole__c where Approval_Status__c = 'Accepted' and Contact__r.RecordTypeId =:HCPRecordTypeId) and 
+                                                 (CreatedDate >=: FDate and CreatedDate <=: TDate)
+                                                 Group By Id];
+        }
+                                                                                 
+        AggregateResult[] arCompleted = [Select Count(Course__c) 
+                                         from CourseAssignment__c 
+                                         where Contact__r.AccountId =:PracticeId  and 
+                                               Status__c = 'Completed' and 
+                                               Contact__c in (Select Contact__c From AccountContactRole__c where Approval_Status__c = 'Accepted' and Contact__r.RecordTypeId =:HCPRecordTypeId) 
+                                               Group By Id];
+        if(FDate != null && TDate != null){  
+            arCompleted = [Select Count(Course__c) 
+                                           from CourseAssignment__c 
+                                           where Contact__r.AccountId =:PracticeId  and 
+                                                 Status__c = 'Completed' and 
+                                                 Contact__c in (Select Contact__c From AccountContactRole__c where Approval_Status__c = 'Accepted' and Contact__r.RecordTypeId =:HCPRecordTypeId) and 
+                                                 (CompletionDate__c >=: FDate and CompletionDate__c <=: TDate)
+                                                 Group By Id];                                               
+        }
+        
+        System.debug('### Final lsContact>>>>>>>>>'+arStarted.size() + ' @:'+arCompleted.size());
+        
+        AggregateResult[] TopCours ;
+        TopCours = [ Select Course__r.Name Cname,Course__c cId, Count(ID)  from CourseAssignment__c where Contact__r.AccountId =:PracticeId and Contact__r.RecordTypeId  =:HCPRecordTypeId and Status__c = 'Completed' group by  Course__r.Name, Course__c Order By Count(ID) desc limit 3];
+        if(FDate != null && TDate != null) { TopCours = [ Select Course__r.Name Cname,Course__c cId, Count(ID)  from CourseAssignment__c where Contact__r.AccountId =:PracticeId and Contact__r.RecordTypeId  =:HCPRecordTypeId and Status__c = 'Completed' and (CompletionDate__c >=: FDate and CompletionDate__c <=: TDate) group by  Course__r.Name, Course__c Order By Count(ID) desc limit 3];}
+        
+        System.debug('### Final lsContact>>>>>>>>>'+TopCours);
+        List<TopCourse> tp = new List<TopCourse>();
+        if(TopCours!=null)
+        {
+            for(AggregateResult ars : TopCours){
+                System.debug('### Course name>>>>>>>>>'+ars.get('Cname'));
+                System.debug('### Course Id>>>>>>>>>'+ars.get('Cid')); 
+                TopCourse t = new TopCourse();
+                t.Name =  (String)ars.get('Cname');
+                t.CourseId = (String) ars.get('CId');
+                tp.add(t);
+            }
+        }
+        
+                
+        System.debug('#########Top Courses>>>>'+tp);
+        System.debug('### Final lsContact>>>>>>>>>'+practiceUser);
+        PracticeDetailedResponse result = new PracticeDetailedResponse();
+        if(practiceUser.size()>0){
+            result.PracticeName = practiceUser[0].Account.Name;
+            result.PracticeId = practiceUser[0].AccountId;
+            result.ActiveUsers = practiceUser.size();  
+            
+            List<UserDetails>  usdet = new List<UserDetails>();
+            for(user us: practiceUser){
+                UserDetails u = new UserDetails(us);
+                System.debug('##### User detail >>>>>>>'+u);
+                usdet.add(u);
+            } 
+            result.UserDetails = usdet;
+        }else{
+            result.PracticeName = Acc.Name;
+            result.PracticeId = Acc.Id;
+            result.ActiveUsers = 0;
+            result.CoursesStarted = 0;
+            result.CourseCompleted = 0;
+            result.ResourcesEmailed = 0;
+            result.ResourcesDownloaded = 0;
+            result.ProductPageViews = 0;
+            result.UserDetails = null;
+            result.TopCourses =null;
+        } 
+         
+        if(tp.size()>0 && tp != null )  result.TopCourses = tp;
+        if(arStarted.size()>0 && arStarted != null) result.CoursesStarted = arStarted.size();
+        if(arCompleted.size()>0 && arCompleted!= null) result.CourseCompleted = arCompleted.size(); 
+        
+        if(reportCenterCount.size()>0){ 
+            for(AggregateResult ars : reportCenterCount){
+                if(ars.get('Type__c') == 'Resources Emailed') result.ResourcesEmailed =  (Integer) ars.get('expr0');
+                if(ars.get('Type__c') == 'Resources Downloaded') result.ResourcesDownloaded = (Integer) ars.get('expr0');
+                if(ars.get('Type__c') == 'Product Page Views') result.ProductPageViews = (Integer) ars.get('expr0');
+            }
+        }
+        
+        
+        if(Top3Resource.size()>0){
+            List<TopResources> topress = new List<TopResources>();
+            for(AggregateResult arRes :Top3Resource){
+                System.debug('### Top Resources >>>'+arRes);
+                TopResources topres = new TopResources();
+                topres.Name = (String) arRes.get('Resource_Product__c');
+                topress.add(topres);
+            }
+            result.TopResources = topress;
+        }
+         
+        if(Top3Page.size()>0){
+            List<TopVisitedPages> toppage = new List<TopVisitedPages>();
+            for(AggregateResult arpg :Top3Page){
+                System.debug('### Top Resources >>>'+arpg);
+                TopVisitedPages tpg = new TopVisitedPages();
+                tpg.Name = (String) arpg.get('Resource_Product__c');
+                toppage.add(tpg);
+            }  
+            result.TopVisitedPages = toppage;      
+        }
+        
+        /* Get Email sent/ open response from marketing cloud using API*/
+        
+        System.debug('FDate:'+FDate);
+        System.debug('TDate:'+TDate);   
+          // Get Sent EMail Details   
+        List<ET_EmailAdministration.RetrieveResponse> SentRes  = new List<ET_EmailAdministration.RetrieveResponse>();
+        SentRes  = ET_EmailAdministration.SendRetriveRequest('SentEvent',FDate,TDate,PracticeId);
+        System.debug('#######SentRes>>>>>>>>>>'+SentRes);
+          // Get Open email  details
+        //ET_EmailAdministration.lstRes.clear();
+        List<ET_EmailAdministration.RetrieveResponse> OpenRes  = new List<ET_EmailAdministration.RetrieveResponse>();
+        OpenRes  = ET_EmailAdministration.SendRetriveRequest('OpenEvent',FDate,TDate,PracticeId);
+        
+        System.debug('#######Openres>>>>>>>>>>'+Openres);
+        System.debug('#######SentResafter>>>>>>>>>>'+SentRes);
+        
+        Map<String,String> mpOpenEvent = new Map<String,String>();
+        for(ET_EmailAdministration.RetrieveResponse etr : OpenRes){
+            mpOpenEvent.put(etr.BatchId, etr.EventDate);
+        }
+        
+        System.debug('#######mpOpenEvent>>>>>>>>>>'+mpOpenEvent);
+        
+        List<EmailResult> ler = new List<EmailResult>(); 
+        Map<String, EmailResult> mper = new Map<String,EmailResult>();
+        
+        System.debug('#######SentReslast>>>>>>>>>>'+SentRes.size());
+        
+        for(ET_EmailAdministration.RetrieveResponse etr : SentRes){
+            System.debug('###########::'+etr.TriggerSendId);
+            EmailResult er = new EmailResult();
+            String[] ss = etr.EventDate.substring(0,10).split('-');
+            er.EmailTriggerId = etr.TriggerSendId;
+            er.SentDate = ss[1]+'/'+ss[2]+'/'+ss[0];
+            if(mpOpenEvent.containsKey(etr.BatchId))
+            {
+                String[] s = mpOpenEvent.get(etr.BatchId).substring(0,10).split('-');
+                er.OpenDate = s[1]+'/'+s[2]+'/'+s[0];
+            }
+            ler.add(er);
+        } 
+        
+        result.EmailResults = ler;                                                                                                                                      
+      return result; 
+      
+  }
+  
+  global class ResultsPracticeDetails extends BaseRestResponse {
+      List<PracticeDetails> Practices {get;set;}
+  } 
+   
+  global class PracticeDetailedResponse extends BaseRestResponse {
+      String PracticeName {get;set;}
+      String PracticeId {get;set;}
+      Integer ActiveUsers {get;set;}
+      Integer CoursesStarted {get;set;}
+      Integer CourseCompleted {get;set;}
+      integer ResourcesEmailed {get;set;}
+      integer ResourcesDownloaded {get;set;}
+      integer ProductPageViews {get;set;}
+      UserDetails[] UserDetails {get;set;}
+      TopCourse[] TopCourses  {get;set;}
+      TopResources[] TopResources {get;set;}
+      TopVisitedPages[] TopVisitedPages {get;set;}
+      EmailResult[] EmailResults {get;set;}
+  }
+  
+  global class TopResources extends BaseRestResponse {
+      String Name {get;set;}
+  }
+  
+  global class TopVisitedPages extends BaseRestResponse {
+      String Name {get;set;}
+  }
+  
+  global class EmailResult extends BaseRestResponse{
+      String EmailTriggerId {get;set;}
+      String SentDate {get;set;}
+      String OpenDate {get;set;}
+  }
+  
+  global class PracticeDetails extends BaseRestResponse {
+      String Name {get;set;}
+      String Id {get;set;}
+      String SAPAccountNumber{get;set;}
+      String EmailAddress{get;set;}
+      String Street {get;set;}
+      String City {get;set;}
+      String State {get;set;}
+      String PostalCode {get;set;}
+      String Country {get;set;}
+      String OwnerId {get;set;}
+      String OwnerName {get;set;}
+      boolean isEmailOptout {get;set;}
+      
+      public PracticeDetails(Account acc){
+          System.debug('Account:'+acc);
+          Name = acc.Name;
+          Id = acc.Id;
+          SAPAccountNumber = acc.SAP_Account_Number__c;
+          EmailAddress = acc.Email__c;
+          Street = acc.shippingStreet;
+          City = acc.shippingcity;
+          State = acc.shippingstate;
+          PostalCode = acc.ShippingPostalCode;
+          Country = acc.shippingcountry;
+          isEmailOptout = acc.Opt_Out__c;
+          OwnerId = null;
+          OwnerName = null;
+      }  
+  }
+  
+  global class UserDetails extends BaseRestResponse {
+      String FirstName {get;set;}
+      String LastName{get;set;}
+      String EmailAddress{get;set;}
+      String Role {get;set;}
+      Id UserId {get;set;}
+      public UserDetails(User U){
+          System.debug('user in dto>>>>'+u);
+           FirstName = u.FirstName;
+           LastName = u.LastName;
+           EmailAddress = u.Email;
+           Role = u.Occupation__c;
+           UserId = u.Id; 
+      }  
+  }  
+  
+  global class TopCourse extends BaseRestResponse {
+      String Name {get;set;}
+      Id CourseId {get;set;}
+  }
+  
+   @HTTPPOST
+     global static String doPOST() {
+         RestRequest req = RestContext.request;
+         RestResponse res = Restcontext.response;
+         Blob body = req.requestBody;
+         
+         ResourceDetails rDetails= (ResourceDetails) System.JSON.deserialize(body.toString(), ResourceDetails.class);
+         System.debug('Request Body Details:'+rDetails);
+         
+         if(rDetails.PracticeId != null || rDetails.PracticeId != ''){
+             Report_Center_Data__c rcData = new Report_Center_Data__c();
+             rcData.Account__c = rDetails.PracticeId;
+             rcData.Type__c = rDetails.Type;
+             rcData.Resource_Product__c = rDetails.ResourceProductId;
+             
+             insert rcData;
+             
+             return '{"Status": "Success"}';
+         }
+         return null;
+     }
+
+  global class ResourceDetails extends BaseRestResponse {
+      String PracticeId {get;set;}
+      String Type {get;set;}
+      String ResourceProductId {get;set;}
+      Id UserId {get;set;}
+  }     
+
+   @HTTPPUT
+     global static String doPUT() {
+         RestRequest req = RestContext.request;
+         RestResponse res = Restcontext.response;
+         Blob body = req.requestBody;
+         string repname; string repemail;
+         EmailSendData EmailDetails= (EmailSendData) System.JSON.deserialize(body.toString(), EmailSendData.class);
+         System.debug('Request Body Details:'+EmailDetails.PracticeId);
+         User u = [SELECT ID,Name,Email FROM User WHERE ID=:EmailDetails.Userid];
+         repname  = u.Name;
+         repemail = U.Email;
+         if(EmailDetails.EmailTriggerId != null || EmailDetails.EmailTriggerId!= ''){
+             Set<String> AccId = new Set<String>();
+             for(PracticeId s :EmailDetails.PracticeId){
+                 System.debug('s>>>>'+s);
+                 AccId.add(s.Id);
+             }
+             Map<ID,String> mpAccMap = new Map<ID,String>();
+             List<Account> emailAccounts = [Select Id, Opt_Out__c, Email__c,TBM_Name__c,TBM_Name__r.name,TBM_Name__r.Email from Account where Id in:AccId];
+             for(Account a : emailAccounts)
+             {                
+                 if(a.Opt_Out__c == false) mpAccMap.put(a.Id, a.Email__c);
+             }
+             System.debug(mpAccMap);
+             ET_EmailAdministration.sendEmailtoAccount(mpAccMap,EmailDetails.EmailTriggerId,repname,repemail);
+         }
+         return '{"Status": "Success"}';
+     } 
+     
+     global class EmailSendData{
+         String EmailTriggerId {get;set;}
+         Id UserId {get;set;}
+         List<PracticeId> PracticeId;
+    }   
+    
+    public class PracticeId {
+        public String Id;
+    }   
+}
